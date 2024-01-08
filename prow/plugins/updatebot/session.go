@@ -347,7 +347,8 @@ func (session *Session) ConcludeSubmoduleStatus(submodule *SubmoduleInfo) error 
 		owner := session.OwnerLogin
 		repo := submodule.BaseInfo.Name
 		SHA := submodule.PRInfo.Head.SHA
-		status := CommitStatus(session.Client, owner, repo, SHA)
+		branch := submodule.BaseInfo.Branch
+		status := CommitStatus(session.Client, owner, repo, branch, SHA)
 		if submodule.Status.State != status {
 			submodule.Status.State = status
 			switch status {

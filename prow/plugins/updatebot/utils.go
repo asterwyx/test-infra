@@ -198,7 +198,16 @@ func MoreImportantStatus(result, single string) string {
 	}
 }
 
-func CombinedStatus(client plugins.PluginGitHubClient, owner, repo, SHA string) string {
+func CombinedStatus(client plugins.PluginGitHubClient, owner, repo, branch, SHA string) string {
+	branchProtection, err := client.GetBranchProtection(owner, repo, branch)
+	if err != nil {
+		logrus.WithError(err).Warnf("Cannot get branch protection for %s/%s, branch: %s", owner, repo, branch)
+		return github.StatusError
+	}
+	requiredStatusChecks := []
+	if branchProtection != nil {
+		requiredStatusChecks = branchProtection.RequiredStatusChecks.Contexts
+	}
 	statuses, err := client.GetCombinedStatus(owner, repo, SHA)
 	if err != nil {
 		logrus.WithError(err).Warnf("Cannot list statuses for %s/%s, SHA: %s", owner, repo, SHA)
@@ -210,6 +219,16 @@ func CombinedStatus(client plugins.PluginGitHubClient, owner, repo, SHA string) 
 			continue
 		}
 		result = MoreImportantStatus(result, status.State)
+		for index, rsc := range requiredStatusChecks {
+			if rsc == status.Context {
+				requiredStatusChecks = append(requiredStatusChecks[:index], requiredStatusChecks[index+1:]...)
+				break
+			}
+		}
+	}
+	if len(requiredStatusChecks) != 0 {
+		// There exist some required status checks not created
+		result = MoreImportantStatus(result, github.StatusPending)
 	}
 	return result
 }
@@ -249,7 +268,7 @@ func MoreImportantConclusion(prev, next string) string {
 	}
 }
 
-func CommitStatus(client plugins.PluginGitHubClient, owner, repo, SHA string) string {
+func CommitStatus(client plugins.PluginGitHubClient, owner, repo, branch, SHA string) string {
 	checks, err := client.ListCheckRuns(owner, repo, SHA)
 	if err != nil {
 		logrus.WithError(err).Warnf("Cannot list check runs for %s/%s, SHA: %s", owner, repo, SHA)
@@ -275,7 +294,7 @@ func CommitStatus(client plugins.PluginGitHubClient, owner, repo, SHA string) st
 	default:
 		status = github.StatusSuccess
 	}
-	return MoreImportantStatus(status, CombinedStatus(client, owner, repo, SHA))
+	return MoreImportantStatus(status, CombinedStatus(client, owner, repo, branch, SHA))
 }
 
 func PRApproved(client plugins.PluginGitHubClient, pullRequest *github.PullRequest) bool {
