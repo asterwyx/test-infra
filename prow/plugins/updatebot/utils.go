@@ -211,7 +211,7 @@ func CombinedStatus(client plugins.PluginGitHubClient, owner, repo, branch, SHA 
 	statuses, err := client.GetCombinedStatus(owner, repo, SHA)
 	if err != nil {
 		logrus.WithError(err).Warnf("Cannot list statuses for %s/%s, SHA: %s", owner, repo, SHA)
-		return github.StatusPending
+		return github.StatusError
 	}
 	result := github.StatusSuccess
 	for _, status := range statuses.Statuses {
@@ -272,7 +272,7 @@ func CommitStatus(client plugins.PluginGitHubClient, owner, repo, branch, SHA st
 	checks, err := client.ListCheckRuns(owner, repo, SHA)
 	if err != nil {
 		logrus.WithError(err).Warnf("Cannot list check runs for %s/%s, SHA: %s", owner, repo, SHA)
-		return github.StatusPending
+		return github.StatusError
 	}
 	conclusion := "skipped"
 	for _, check := range checks.CheckRuns {
