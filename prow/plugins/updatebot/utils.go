@@ -37,6 +37,26 @@ func (gce GitClientError) Error() string {
 	}
 }
 
+type GHAPIError struct {
+	owner string
+	repo string
+	api string
+	msg string
+	err error
+}
+
+func (gae GHAPIError) Error() string {
+	if gae.err != nil {
+		return fmt.Sprintf("%s/%s-%s-%s, %v", gae.owner, gae.repo, gae.api, gae.msg, gae.err)
+	} else {
+		return fmt.Sprintf("%s/%s-%s-%s", gae.owner, gae.repo, gae.api, gae.msg)
+	}
+}
+
+func (gae GHAPIError) Unwrap() error {
+	return gae.err
+}
+
 type TagExistError struct {
 	repo string
 	tag  string
@@ -198,20 +218,35 @@ func MoreImportantStatus(result, single string) string {
 	}
 }
 
-func CombinedStatus(client plugins.PluginGitHubClient, owner, repo, branch, SHA string) string {
+func CombinedStatus(client plugins.PluginGitHubClient, owner, repo, branch, SHA string) (string, error) {
+	// Get branch protection for required status check
 	branchProtection, err := client.GetBranchProtection(owner, repo, branch)
 	if err != nil {
-		logrus.WithError(err).Warnf("Cannot get branch protection for %s/%s, branch: %s", owner, repo, branch)
-		return github.StatusError
+		ghAPIErr := &GHAPIError{
+			owner: owner,
+			repo: repo,
+			api: "GetBranchProtection",
+			msg: "Cannot get branch protection.",
+			err: err,
+		}
+		logrus.WithError(ghAPIErr).Warnf("Cannot get branch protection for %s/%s, branch: %s", owner, repo, branch)
+		return github.StatusError, ghAPIErr
 	}
-	requiredStatusChecks := []
+	var requiredStatusChecks []string
 	if branchProtection != nil {
 		requiredStatusChecks = branchProtection.RequiredStatusChecks.Contexts
 	}
 	statuses, err := client.GetCombinedStatus(owner, repo, SHA)
 	if err != nil {
-		logrus.WithError(err).Warnf("Cannot list statuses for %s/%s, SHA: %s", owner, repo, SHA)
-		return github.StatusError
+		ghAPIErr := &GHAPIError{
+			owner: owner,
+			repo: repo,
+			api: "GetCombinedStatus",
+			msg: "Cannot get combined status.",
+			err: err,
+		}
+		logrus.WithError(ghAPIErr).Warnf("Cannot list statuses for %s/%s, SHA: %s", owner, repo, SHA)
+		return github.StatusError, ghAPIErr
 	}
 	result := github.StatusSuccess
 	for _, status := range statuses.Statuses {
@@ -230,7 +265,7 @@ func CombinedStatus(client plugins.PluginGitHubClient, owner, repo, branch, SHA 
 		// There exist some required status checks not created
 		result = MoreImportantStatus(result, github.StatusPending)
 	}
-	return result
+	return result, nil
 }
 
 // If all checks are passed (success or skipped), return true
@@ -268,11 +303,18 @@ func MoreImportantConclusion(prev, next string) string {
 	}
 }
 
-func CommitStatus(client plugins.PluginGitHubClient, owner, repo, branch, SHA string) string {
+func CommitStatus(client plugins.PluginGitHubClient, owner, repo, branch, SHA string) (string, error) {
 	checks, err := client.ListCheckRuns(owner, repo, SHA)
 	if err != nil {
-		logrus.WithError(err).Warnf("Cannot list check runs for %s/%s, SHA: %s", owner, repo, SHA)
-		return github.StatusError
+		ghAPIError := &GHAPIError{
+			owner: owner,
+			repo: repo,
+			api: "ListCheckRuns",
+			msg: "Cannot list check runs.",
+			err: err,
+		}
+		logrus.WithError(ghAPIError).Warnf("Cannot list check runs for %s/%s, SHA: %s", owner, repo, SHA)
+		return github.StatusError, ghAPIError
 	}
 	conclusion := "skipped"
 	for _, check := range checks.CheckRuns {
@@ -286,15 +328,19 @@ func CommitStatus(client plugins.PluginGitHubClient, owner, repo, branch, SHA st
 	var status string
 	switch conclusion {
 	case "failure", "timed_out":
-		return github.StatusFailure
+		return github.StatusFailure, nil
 	case "cancelled":
-		return github.StatusError
+		return github.StatusError, nil
 	case "pending", "action_required":
 		status = github.StatusPending
 	default:
 		status = github.StatusSuccess
 	}
-	return MoreImportantStatus(status, CombinedStatus(client, owner, repo, branch, SHA))
+	combinedStatus, err := CombinedStatus(client, owner, repo, branch, SHA)
+	if err != nil {
+		return github.StatusError, err
+	}
+	return MoreImportantStatus(status, combinedStatus), nil
 }
 
 func PRApproved(client plugins.PluginGitHubClient, pullRequest *github.PullRequest) bool {

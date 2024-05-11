@@ -1,6 +1,7 @@
 package updatebot
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	githubql "github.com/shurcooL/githubv4"
 	"github.com/sirupsen/logrus"
 	"k8s.io/test-infra/prow/git/v2"
 	"k8s.io/test-infra/prow/github"
@@ -339,16 +341,80 @@ func (session *Session) SubmoduleMerged() bool {
 	return true
 }
 
+// Conclude submodule status, i.e. status of the pull request, including
+// 1. status of checks and commit status
+// 2. status of threads
+// 3. status of commit SHA(if up-to-date)
+type mergeStateStatusQuery struct {
+	Repository struct {
+		PullRequest struct {
+			MergeStateStatus githubql.String
+		} `graphql:"pullRequest(number: $number)"`
+	} `graphql:"repository(owner: $owner, name:, $name)"`
+}
 func (session *Session) ConcludeSubmoduleStatus(submodule *SubmoduleInfo) error {
 	if submodule.Status == nil || session.Stage() > utypes.WAITING {
 		// Don't update any status after WAITING stage
+		// Because commit statuses and checks might change after pull request merged.
 		return nil
 	} else if submodule.MergedSHA == "" {
 		owner := session.OwnerLogin
 		repo := submodule.BaseInfo.Name
 		SHA := submodule.PRInfo.Head.SHA
 		branch := submodule.BaseInfo.Branch
-		status := CommitStatus(session.Client, owner, repo, branch, SHA)
+		status, err := CommitStatus(session.Client, owner, repo, branch, SHA)
+		if err != nil {
+			// Some network errors
+			submodule.Status.State = github.StatusError
+			submodule.Status.Description = err.Error()
+			csErr := session.CreateStatus(*submodule.Status)
+			if csErr != nil {
+				return fmt.Errorf("Failed to update status for PR: %s, %w", submodule.PRInfo.HTMLURL, csErr)
+			}
+			// Just return nil cause conclusion is not complete
+			return nil
+		}
+		branchProtection, err := session.Client.GetBranchProtection(owner, repo, branch)
+		if err != nil {
+			ghAPIErr := &GHAPIError{
+				owner: owner,
+				repo: repo,
+				api: "GetBranchProtection",
+				msg: "Cannot get branch protection",
+				err: err,
+			}
+			session.Logger.WithError(ghAPIErr).Warn()
+			return ghAPIErr
+		}
+		if branchProtection != nil {
+			if branchProtection.RequiredStatusChecks.Strict {
+				// Use githubql to query status
+				query := &mergeStateStatusQuery{}
+				vars := map[string]interface{}{
+					"owner": githubql.String(owner),
+					"name": githubql.String(repo),
+					"number": githubql.Int(submodule.PRInfo.Number),
+				}
+				err := session.Client.Query(context.Background(), query, vars)
+				if err != nil {
+					ghAPIErr := &GHAPIError{
+						owner: owner,
+						repo: repo,
+						api: "QueryMergeStateStatus",
+						msg: "Cannot query merge state status",
+						err: err,
+					}
+					session.Logger.WithError(ghAPIErr).Warn()
+					return ghAPIErr
+				}
+				mergeStateStatus := string(query.Repository.PullRequest.MergeStateStatus)
+				fmt.Println("merge state status", mergeStateStatus)
+				if mergeStateStatus == "BEHIND" || mergeStateStatus == "UNSTABLE" {
+					// Might behind
+					status = MoreImportantStatus(github.StatusPending, status)
+				}
+			}
+		}
 		if submodule.Status.State != status {
 			submodule.Status.State = status
 			switch status {
